@@ -1,28 +1,35 @@
 const db = require('../../db');
 
-const ROLES_TABLE = 'roles';
-const USER_ROLES_TABLE = 'user_roles';
-const USERS_TABLE = 'users';
+// ---------------------------------------------------------------------------
+// Role CRUD
+// ---------------------------------------------------------------------------
 
 /**
- * Retrieve all roles.
+ * Return all roles ordered by name.
  * @returns {Promise<Array>}
  */
 async function getAllRoles() {
-  return db(ROLES_TABLE).select('id', 'name', 'description', 'created_at', 'updated_at').orderBy('name');
+  const { rows } = await db.query(
+    `SELECT id, name, description, created_at, updated_at
+     FROM roles
+     ORDER BY name ASC`,
+  );
+  return rows;
 }
 
 /**
- * Retrieve a single role by its primary key.
- * @param {number|string} roleId
+ * Return a single role by primary key, or null if not found.
+ * @param {string|number} roleId
  * @returns {Promise<object|null>}
  */
 async function getRoleById(roleId) {
-  const role = await db(ROLES_TABLE)
-    .select('id', 'name', 'description', 'created_at', 'updated_at')
-    .where({ id: roleId })
-    .first();
-  return role || null;
+  const { rows } = await db.query(
+    `SELECT id, name, description, created_at, updated_at
+     FROM roles
+     WHERE id = $1`,
+    [roleId],
+  );
+  return rows[0] || null;
 }
 
 /**
@@ -31,114 +38,153 @@ async function getRoleById(roleId) {
  * @returns {Promise<object>}
  */
 async function createRole({ name, description = null }) {
-  const [id] = await db(ROLES_TABLE).insert(
-    { name, description },
-    ['id'],
+  const existing = await _findRoleByName(name);
+  if (existing) {
+    const err = new Error(`A role with the name "${name}" already exists.`);
+    err.code = 'DUPLICATE_ROLE';
+    throw err;
+  }
+
+  const { rows } = await db.query(
+    `INSERT INTO roles (name, description)
+     VALUES ($1, $2)
+     RETURNING id, name, description, created_at, updated_at`,
+    [name, description],
   );
-  const insertedId = typeof id === 'object' ? id.id : id;
-  return getRoleById(insertedId);
+  return rows[0];
 }
 
 /**
- * Update an existing role.
- * @param {number|string} roleId
+ * Update an existing role. Returns null when the role is not found.
+ * @param {string|number} roleId
  * @param {{ name?: string, description?: string }} payload
  * @returns {Promise<object|null>}
  */
 async function updateRole(roleId, { name, description }) {
-  const updates = {};
-  if (name !== undefined) updates.name = name;
-  if (description !== undefined) updates.description = description;
-  updates.updated_at = db.fn.now();
+  const role = await getRoleById(roleId);
+  if (!role) return null;
 
-  const count = await db(ROLES_TABLE).where({ id: roleId }).update(updates);
-  if (!count) return null;
-  return getRoleById(roleId);
+  const newName = name !== undefined ? name.trim() : role.name;
+  const newDescription = description !== undefined ? description : role.description;
+
+  if (newName !== role.name) {
+    const existing = await _findRoleByName(newName);
+    if (existing && String(existing.id) !== String(roleId)) {
+      const err = new Error(`A role with the name "${newName}" already exists.`);
+      err.code = 'DUPLICATE_ROLE';
+      throw err;
+    }
+  }
+
+  const { rows } = await db.query(
+    `UPDATE roles
+     SET name = $1, description = $2, updated_at = NOW()
+     WHERE id = $3
+     RETURNING id, name, description, created_at, updated_at`,
+    [newName, newDescription, roleId],
+  );
+  return rows[0] || null;
 }
 
 /**
- * Delete a role and its user associations.
- * @param {number|string} roleId
+ * Delete a role and its user-role associations. Returns true when deleted,
+ * false when the role did not exist.
+ * @param {string|number} roleId
  * @returns {Promise<boolean>}
  */
 async function deleteRole(roleId) {
-  const count = await db(ROLES_TABLE).where({ id: roleId }).delete();
-  return count > 0;
+  // Remove associations first to respect FK constraints if cascade is not set.
+  await db.query('DELETE FROM user_roles WHERE role_id = $1', [roleId]);
+
+  const { rowCount } = await db.query(
+    'DELETE FROM roles WHERE id = $1',
+    [roleId],
+  );
+  return rowCount > 0;
 }
 
+// ---------------------------------------------------------------------------
+// User-role associations
+// ---------------------------------------------------------------------------
+
 /**
- * Retrieve all users that have been assigned the given role.
- * @param {number|string} roleId
+ * Return all users assigned to the given role.
+ * @param {string|number} roleId
  * @returns {Promise<Array>}
  */
-async function getUsersByRoleId(roleId) {
-  return db(USER_ROLES_TABLE)
-    .join(USERS_TABLE, `${USERS_TABLE}.id`, '=', `${USER_ROLES_TABLE}.user_id`)
-    .where(`${USER_ROLES_TABLE}.role_id`, roleId)
-    .select(
-      `${USERS_TABLE}.id`,
-      `${USERS_TABLE}.email`,
-      `${USERS_TABLE}.name`,
-      `${USER_ROLES_TABLE}.assigned_at`,
-    );
+async function getUsersForRole(roleId) {
+  const { rows } = await db.query(
+    `SELECT u.id, u.email, u.name, ur.created_at AS assigned_at
+     FROM user_roles ur
+     JOIN users u ON u.id = ur.user_id
+     WHERE ur.role_id = $1
+     ORDER BY u.name ASC`,
+    [roleId],
+  );
+  return rows;
 }
 
 /**
- * Assign a role to a user. Silently ignores duplicate assignments.
- * @param {number|string} userId
- * @param {number|string} roleId
+ * Assign a role to a user.
+ * @param {{ roleId: string|number, userId: string|number }} param0
  * @returns {Promise<object>}
  */
-async function assignRoleToUser(userId, roleId) {
-  const existing = await db(USER_ROLES_TABLE)
-    .where({ user_id: userId, role_id: roleId })
-    .first();
-
-  if (existing) {
-    return existing;
+async function assignRoleToUser({ roleId, userId }) {
+  // Verify the user exists.
+  const { rows: userRows } = await db.query(
+    'SELECT id FROM users WHERE id = $1',
+    [userId],
+  );
+  if (!userRows.length) {
+    const err = new Error('User not found.');
+    err.code = 'USER_NOT_FOUND';
+    throw err;
   }
 
-  const payload = {
-    user_id: userId,
-    role_id: roleId,
-    assigned_at: db.fn.now(),
-  };
+  // Check for an existing assignment.
+  const { rows: existing } = await db.query(
+    'SELECT id FROM user_roles WHERE role_id = $1 AND user_id = $2',
+    [roleId, userId],
+  );
+  if (existing.length) {
+    const err = new Error('User is already assigned to this role.');
+    err.code = 'DUPLICATE_ASSIGNMENT';
+    throw err;
+  }
 
-  await db(USER_ROLES_TABLE).insert(payload);
-
-  return db(USER_ROLES_TABLE)
-    .where({ user_id: userId, role_id: roleId })
-    .first();
+  const { rows } = await db.query(
+    `INSERT INTO user_roles (role_id, user_id)
+     VALUES ($1, $2)
+     RETURNING id, role_id, user_id, created_at`,
+    [roleId, userId],
+  );
+  return rows[0];
 }
 
 /**
- * Revoke a role from a user.
- * @param {number|string} userId
- * @param {number|string} roleId
+ * Remove a role from a user. Returns true when removed, false when the
+ * assignment did not exist.
+ * @param {{ roleId: string|number, userId: string|number }} param0
  * @returns {Promise<boolean>}
  */
-async function revokeRoleFromUser(userId, roleId) {
-  const count = await db(USER_ROLES_TABLE)
-    .where({ user_id: userId, role_id: roleId })
-    .delete();
-  return count > 0;
+async function removeRoleFromUser({ roleId, userId }) {
+  const { rowCount } = await db.query(
+    'DELETE FROM user_roles WHERE role_id = $1 AND user_id = $2',
+    [roleId, userId],
+  );
+  return rowCount > 0;
 }
 
-/**
- * Retrieve all roles assigned to a user.
- * @param {number|string} userId
- * @returns {Promise<Array>}
- */
-async function getRolesForUser(userId) {
-  return db(USER_ROLES_TABLE)
-    .join(ROLES_TABLE, `${ROLES_TABLE}.id`, '=', `${USER_ROLES_TABLE}.role_id`)
-    .where(`${USER_ROLES_TABLE}.user_id`, userId)
-    .select(
-      `${ROLES_TABLE}.id`,
-      `${ROLES_TABLE}.name`,
-      `${ROLES_TABLE}.description`,
-      `${USER_ROLES_TABLE}.assigned_at`,
-    );
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+async function _findRoleByName(name) {
+  const { rows } = await db.query(
+    'SELECT id, name FROM roles WHERE LOWER(name) = LOWER($1)',
+    [name],
+  );
+  return rows[0] || null;
 }
 
 module.exports = {
@@ -147,8 +193,7 @@ module.exports = {
   createRole,
   updateRole,
   deleteRole,
-  getUsersByRoleId,
+  getUsersForRole,
   assignRoleToUser,
-  revokeRoleFromUser,
-  getRolesForUser,
+  removeRoleFromUser,
 };

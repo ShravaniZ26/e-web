@@ -1,8 +1,7 @@
 const rolesService = require('./roles.service');
 
 /**
- * GET /admin/roles
- * List all roles.
+ * GET /roles
  */
 async function listRoles(req, res, next) {
   try {
@@ -14,29 +13,35 @@ async function listRoles(req, res, next) {
 }
 
 /**
- * POST /admin/roles
- * Create a new role.
+ * POST /roles
+ * Body: { name: string, description?: string }
  */
 async function createRole(req, res, next) {
   try {
     const { name, description } = req.body;
-    const role = await rolesService.createRole({ name, description });
+
+    if (!name || typeof name !== 'string' || name.trim() === '') {
+      return res.status(400).json({ error: 'Role name is required.' });
+    }
+
+    const role = await rolesService.createRole({ name: name.trim(), description });
     return res.status(201).json({ data: role });
   } catch (err) {
+    if (err.code === 'DUPLICATE_ROLE') {
+      return res.status(409).json({ error: err.message });
+    }
     next(err);
   }
 }
 
 /**
- * GET /admin/roles/:roleId
- * Get a single role by ID.
+ * GET /roles/:roleId
  */
 async function getRole(req, res, next) {
   try {
-    const { roleId } = req.params;
-    const role = await rolesService.getRoleById(roleId);
+    const role = await rolesService.getRoleById(req.params.roleId);
     if (!role) {
-      return res.status(404).json({ message: 'Role not found.' });
+      return res.status(404).json({ error: 'Role not found.' });
     }
     return res.status(200).json({ data: role });
   } catch (err) {
@@ -45,33 +50,33 @@ async function getRole(req, res, next) {
 }
 
 /**
- * PUT /admin/roles/:roleId
- * Update an existing role.
+ * PUT /roles/:roleId
+ * Body: { name?: string, description?: string }
  */
 async function updateRole(req, res, next) {
   try {
-    const { roleId } = req.params;
     const { name, description } = req.body;
-    const role = await rolesService.updateRole(roleId, { name, description });
-    if (!role) {
-      return res.status(404).json({ message: 'Role not found.' });
+    const updated = await rolesService.updateRole(req.params.roleId, { name, description });
+    if (!updated) {
+      return res.status(404).json({ error: 'Role not found.' });
     }
-    return res.status(200).json({ data: role });
+    return res.status(200).json({ data: updated });
   } catch (err) {
+    if (err.code === 'DUPLICATE_ROLE') {
+      return res.status(409).json({ error: err.message });
+    }
     next(err);
   }
 }
 
 /**
- * DELETE /admin/roles/:roleId
- * Delete a role.
+ * DELETE /roles/:roleId
  */
 async function deleteRole(req, res, next) {
   try {
-    const { roleId } = req.params;
-    const deleted = await rolesService.deleteRole(roleId);
+    const deleted = await rolesService.deleteRole(req.params.roleId);
     if (!deleted) {
-      return res.status(404).json({ message: 'Role not found.' });
+      return res.status(404).json({ error: 'Role not found.' });
     }
     return res.status(204).send();
   } catch (err) {
@@ -80,13 +85,15 @@ async function deleteRole(req, res, next) {
 }
 
 /**
- * GET /admin/roles/:roleId/users
- * List users that have the given role.
+ * GET /roles/:roleId/users
  */
-async function getUsersByRole(req, res, next) {
+async function listUsersForRole(req, res, next) {
   try {
-    const { roleId } = req.params;
-    const users = await rolesService.getUsersByRoleId(roleId);
+    const role = await rolesService.getRoleById(req.params.roleId);
+    if (!role) {
+      return res.status(404).json({ error: 'Role not found.' });
+    }
+    const users = await rolesService.getUsersForRole(req.params.roleId);
     return res.status(200).json({ data: users });
   } catch (err) {
     next(err);
@@ -94,46 +101,51 @@ async function getUsersByRole(req, res, next) {
 }
 
 /**
- * POST /admin/users/:userId/roles
- * Assign a role to a user.
+ * POST /roles/:roleId/users
+ * Body: { userId: string }
  */
 async function assignRoleToUser(req, res, next) {
   try {
-    const { userId } = req.params;
-    const { roleId } = req.body;
-    const userRole = await rolesService.assignRoleToUser(userId, roleId);
-    return res.status(201).json({ data: userRole });
+    const { userId } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({ error: 'userId is required.' });
+    }
+
+    const role = await rolesService.getRoleById(req.params.roleId);
+    if (!role) {
+      return res.status(404).json({ error: 'Role not found.' });
+    }
+
+    const assignment = await rolesService.assignRoleToUser({
+      roleId: req.params.roleId,
+      userId,
+    });
+    return res.status(201).json({ data: assignment });
   } catch (err) {
+    if (err.code === 'DUPLICATE_ASSIGNMENT') {
+      return res.status(409).json({ error: err.message });
+    }
+    if (err.code === 'USER_NOT_FOUND') {
+      return res.status(404).json({ error: err.message });
+    }
     next(err);
   }
 }
 
 /**
- * DELETE /admin/users/:userId/roles/:roleId
- * Revoke a role from a user.
+ * DELETE /roles/:roleId/users/:userId
  */
-async function revokeRoleFromUser(req, res, next) {
+async function removeRoleFromUser(req, res, next) {
   try {
-    const { userId, roleId } = req.params;
-    const removed = await rolesService.revokeRoleFromUser(userId, roleId);
+    const removed = await rolesService.removeRoleFromUser({
+      roleId: req.params.roleId,
+      userId: req.params.userId,
+    });
     if (!removed) {
-      return res.status(404).json({ message: 'User role assignment not found.' });
+      return res.status(404).json({ error: 'User-role assignment not found.' });
     }
     return res.status(204).send();
-  } catch (err) {
-    next(err);
-  }
-}
-
-/**
- * GET /admin/users/:userId/roles
- * List all roles assigned to a user.
- */
-async function getRolesForUser(req, res, next) {
-  try {
-    const { userId } = req.params;
-    const roles = await rolesService.getRolesForUser(userId);
-    return res.status(200).json({ data: roles });
   } catch (err) {
     next(err);
   }
@@ -145,8 +157,7 @@ module.exports = {
   getRole,
   updateRole,
   deleteRole,
-  getUsersByRole,
+  listUsersForRole,
   assignRoleToUser,
-  revokeRoleFromUser,
-  getRolesForUser,
+  removeRoleFromUser,
 };

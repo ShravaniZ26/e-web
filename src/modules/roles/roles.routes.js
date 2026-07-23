@@ -10,7 +10,9 @@ router.get('/:roleId', rolesController.getRole);
 router.put('/:roleId', rolesController.updateRole);
 router.delete('/:roleId', rolesController.deleteRole);
 
-// User-role associations (nested under roles)
-router.get('/:roleId/users', rolesController.getUsersByRole);
+// User-role assignments
+router.get('/:roleId/users', rolesController.listUsersForRole);
+router.post('/:roleId/users', rolesController.assignRoleToUser);
+router.delete('/:roleId/users/:userId', rolesController.removeRoleFromUser);
 
 module.exports = router;
