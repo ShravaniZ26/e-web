@@ -3,50 +3,39 @@
 const Joi = require('joi');
 
 /**
- * Reusable field definitions.
+ * Shared field definitions.
  */
-const fields = {
-  firstName: Joi.string().min(1).max(100).trim(),
-  lastName: Joi.string().min(1).max(100).trim(),
-  phone: Joi.string()
-    .pattern(/^\+?[1-9]\d{1,14}$/)
-    .allow(null, '')
-    .optional(),
-  email: Joi.string().email({ tlds: { allow: false } }).lowercase().trim(),
-  role: Joi.string().valid('admin', 'customer'),
-  password: Joi.string().min(8).max(128),
-};
+const firstName = Joi.string().trim().min(1).max(100);
+const lastName = Joi.string().trim().min(1).max(100);
+const phone = Joi.string().trim().max(30).allow('', null);
+const password = Joi.string().min(8).max(128);
 
 /**
- * PATCH /users/me — self-service profile update.
- * At least one field must be supplied.
+ * PATCH /users/me
+ * At least one of the permitted profile fields must be present.
  */
-const updateProfileSchema = Joi.object({
-  firstName: fields.firstName.optional(),
-  lastName: fields.lastName.optional(),
-  phone: fields.phone,
-})
-  .min(1)
-  .messages({
-    'object.min': 'At least one field must be provided for update.',
-  });
+const updateProfile = Joi.object({
+  firstName: firstName.optional(),
+  lastName: lastName.optional(),
+  phone: phone.optional(),
+}).min(1).messages({
+  'object.min': 'At least one field must be provided to update the profile.',
+});
 
 /**
  * POST /users/me/change-password
  */
-const changePasswordSchema = Joi.object({
+const changePassword = Joi.object({
   currentPassword: Joi.string().required().messages({
     'any.required': 'Current password is required.',
     'string.empty': 'Current password is required.',
   }),
-
-  newPassword: fields.password.required().messages({
+  newPassword: password.required().messages({
     'any.required': 'New password is required.',
     'string.empty': 'New password is required.',
     'string.min': 'New password must be at least 8 characters.',
-    'string.max': 'New password must be at most 128 characters.',
+    'string.max': 'New password must not exceed 128 characters.',
   }),
-
   confirmPassword: Joi.string()
     .valid(Joi.ref('newPassword'))
     .required()
@@ -58,49 +47,35 @@ const changePasswordSchema = Joi.object({
 });
 
 /**
- * PATCH /users/:userId — admin user update (may include role and email).
- * At least one field must be supplied.
+ * GET /users  (query params)
  */
-const updateUserAdminSchema = Joi.object({
-  firstName: fields.firstName.optional(),
-  lastName: fields.lastName.optional(),
-  phone: fields.phone,
-  email: fields.email.optional(),
-  role: fields.role.optional(),
-})
-  .min(1)
-  .messages({
-    'object.min': 'At least one field must be provided for update.',
-    'any.only': 'Role must be one of admin, customer.',
-  });
+const listUsers = Joi.object({
+  page: Joi.number().integer().min(1).default(1),
+  limit: Joi.number().integer().min(1).max(100).default(20),
+  search: Joi.string().trim().max(255).optional(),
+  role: Joi.string().valid('user', 'admin').optional(),
+  isActive: Joi.boolean().optional(),
+});
 
 /**
- * GET /users — admin paginated list query parameters.
+ * PATCH /users/:userId  (admin)
+ * Allows role and isActive in addition to profile fields.
  */
-const listUsersQuerySchema = Joi.object({
-  page: Joi.number().integer().min(1).default(1).messages({
-    'number.base': 'Page must be a number.',
-    'number.integer': 'Page must be an integer.',
-    'number.min': 'Page must be at least 1.',
+const adminUpdateUser = Joi.object({
+  firstName: firstName.optional(),
+  lastName: lastName.optional(),
+  phone: phone.optional(),
+  role: Joi.string().valid('user', 'admin').optional().messages({
+    'any.only': 'Role must be one of: user, admin.',
   }),
-
-  limit: Joi.number().integer().min(1).max(100).default(20).messages({
-    'number.base': 'Limit must be a number.',
-    'number.integer': 'Limit must be an integer.',
-    'number.min': 'Limit must be at least 1.',
-    'number.max': 'Limit must not exceed 100.',
-  }),
-
-  search: Joi.string().trim().max(200).optional(),
-
-  role: fields.role.optional().messages({
-    'any.only': 'Role filter must be one of admin, customer.',
-  }),
+  isActive: Joi.boolean().optional(),
+}).min(1).messages({
+  'object.min': 'At least one field must be provided to update the user.',
 });
 
 module.exports = {
-  updateProfileSchema,
-  changePasswordSchema,
-  updateUserAdminSchema,
-  listUsersQuerySchema,
+  updateProfile,
+  changePassword,
+  listUsers,
+  adminUpdateUser,
 };

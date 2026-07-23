@@ -1,101 +1,104 @@
 'use strict';
 
 const usersService = require('./users.service');
+const { HTTP_STATUS } = require('../../constants/http');
 
 /**
  * GET /users/me
- * Returns the profile of the currently authenticated user.
+ * Returns the authenticated user's own profile.
  */
 const getMe = async (req, res, next) => {
   try {
     const user = await usersService.getUserById(req.user.id);
-    res.status(200).json({ data: user });
+    return res.status(HTTP_STATUS.OK).json({ data: user });
   } catch (err) {
-    next(err);
+    return next(err);
   }
 };
 
 /**
  * PATCH /users/me
- * Updates the profile of the currently authenticated user.
+ * Updates the authenticated user's own profile fields.
  */
 const updateMe = async (req, res, next) => {
   try {
-    const user = await usersService.updateProfile(req.user.id, req.body);
-    res.status(200).json({ data: user });
+    const updated = await usersService.updateProfile(req.user.id, req.body);
+    return res.status(HTTP_STATUS.OK).json({ data: updated });
   } catch (err) {
-    next(err);
+    return next(err);
   }
 };
 
 /**
  * POST /users/me/change-password
- * Changes the password for the currently authenticated user.
+ * Allows the authenticated user to change their own password.
  */
 const changePassword = async (req, res, next) => {
   try {
-    await usersService.changePassword(req.user.id, req.body);
-    res.status(204).end();
+    const { currentPassword, newPassword } = req.body;
+    await usersService.changePassword(req.user.id, currentPassword, newPassword);
+    return res.status(HTTP_STATUS.OK).json({ message: 'Password updated successfully.' });
   } catch (err) {
-    next(err);
+    return next(err);
   }
 };
 
 /**
  * GET /users
- * Admin: paginated list of all users.
+ * Admin: Returns a paginated list of all users.
  */
-const listUsers = async (req, res, next) => {
+const getUsers = async (req, res, next) => {
   try {
-    const { page, limit, search, role } = req.query;
+    const { page = 1, limit = 20, search, role, isActive } = req.query;
     const result = await usersService.listUsers({
-      page: page !== undefined ? Number(page) : 1,
-      limit: limit !== undefined ? Number(limit) : 20,
+      page: Number(page),
+      limit: Number(limit),
       search,
       role,
+      isActive: isActive !== undefined ? isActive === 'true' : undefined,
     });
-    res.status(200).json(result);
+    return res.status(HTTP_STATUS.OK).json(result);
   } catch (err) {
-    next(err);
+    return next(err);
   }
 };
 
 /**
  * GET /users/:userId
- * Admin: fetch a single user by id.
+ * Admin: Returns a single user by ID.
  */
 const getUserById = async (req, res, next) => {
   try {
     const user = await usersService.getUserById(req.params.userId);
-    res.status(200).json({ data: user });
+    return res.status(HTTP_STATUS.OK).json({ data: user });
   } catch (err) {
-    next(err);
+    return next(err);
   }
 };
 
 /**
  * PATCH /users/:userId
- * Admin: update any field (including role) of a user.
+ * Admin: Updates any user's profile or role.
  */
 const updateUser = async (req, res, next) => {
   try {
-    const user = await usersService.updateUser(req.params.userId, req.body);
-    res.status(200).json({ data: user });
+    const updated = await usersService.adminUpdateUser(req.params.userId, req.body);
+    return res.status(HTTP_STATUS.OK).json({ data: updated });
   } catch (err) {
-    next(err);
+    return next(err);
   }
 };
 
 /**
  * DELETE /users/:userId
- * Admin: soft-delete a user account.
+ * Admin: Soft-deletes a user account.
  */
 const deleteUser = async (req, res, next) => {
   try {
     await usersService.deleteUser(req.params.userId);
-    res.status(204).end();
+    return res.status(HTTP_STATUS.NO_CONTENT).send();
   } catch (err) {
-    next(err);
+    return next(err);
   }
 };
 
@@ -103,7 +106,7 @@ module.exports = {
   getMe,
   updateMe,
   changePassword,
-  listUsers,
+  getUsers,
   getUserById,
   updateUser,
   deleteUser,

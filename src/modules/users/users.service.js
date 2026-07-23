@@ -2,11 +2,12 @@
 
 const bcrypt = require('bcrypt');
 const db = require('../../db');
+const AppError = require('../../errors/AppError');
+const { HTTP_STATUS } = require('../../constants/http');
 
-const TABLE = 'users';
 const SALT_ROUNDS = 12;
 
-/** Columns safe to return to callers (never includes password_hash). */
+/** Columns returned to callers (never expose password_hash). */
 const PUBLIC_COLUMNS = [
   'id',
   'email',
@@ -14,208 +15,177 @@ const PUBLIC_COLUMNS = [
   'last_name',
   'phone',
   'role',
+  'is_active',
   'created_at',
   'updated_at',
 ];
 
 /**
- * Build an AppError-compatible error.
- * @param {string} message
- * @param {number} statusCode
+ * Fetch a single user by primary key.
+ * Throws 404 when not found.
  */
-function createError(message, statusCode) {
-  const err = new Error(message);
-  err.statusCode = statusCode;
-  return err;
-}
-
-/**
- * Fetch a single non-deleted user by primary key.
- * @param {string} userId
- * @returns {Promise<object>}
- */
-async function getUserById(userId) {
-  const user = await db(TABLE)
-    .where({ id: userId })
-    .whereNull('deleted_at')
+const getUserById = async (userId) => {
+  const user = await db('users')
     .select(PUBLIC_COLUMNS)
+    .where({ id: userId, deleted_at: null })
     .first();
 
   if (!user) {
-    throw createError('User not found.', 404);
+    throw new AppError('User not found.', HTTP_STATUS.NOT_FOUND);
   }
 
   return user;
-}
+};
 
 /**
- * Return a paginated list of non-deleted users.
- * @param {object} opts
- * @param {number} opts.page
- * @param {number} opts.limit
- * @param {string} [opts.search]
- * @param {string} [opts.role]
- * @returns {Promise<{ data: object[], meta: object }>}
+ * Update the authenticated user's own profile (non-sensitive fields only).
  */
-async function listUsers({ page = 1, limit = 20, search, role } = {}) {
-  const offset = (page - 1) * limit;
-
-  const baseQuery = db(TABLE).whereNull('deleted_at');
-
-  if (search) {
-    const term = `%${search}%`;
-    baseQuery.where(function () {
-      this.where('email', 'ilike', term)
-        .orWhere('first_name', 'ilike', term)
-        .orWhere('last_name', 'ilike', term);
-    });
-  }
-
-  if (role) {
-    baseQuery.where({ role });
-  }
-
-  const [{ count }] = await baseQuery.clone().count('id as count');
-  const total = parseInt(count, 10);
-
-  const data = await baseQuery
-    .clone()
-    .select(PUBLIC_COLUMNS)
-    .orderBy('created_at', 'desc')
-    .limit(limit)
-    .offset(offset);
-
-  return {
-    data,
-    meta: {
-      total,
-      page,
-      limit,
-      totalPages: Math.ceil(total / limit),
-    },
-  };
-}
-
-/**
- * Update the profile fields of a user (self-service; no role change).
- * @param {string} userId
- * @param {object} payload
- * @returns {Promise<object>}
- */
-async function updateProfile(userId, payload) {
+const updateProfile = async (userId, payload) => {
   const { firstName, lastName, phone } = payload;
 
-  const updates = { updated_at: db.fn.now() };
+  const updates = {};
   if (firstName !== undefined) updates.first_name = firstName;
   if (lastName !== undefined) updates.last_name = lastName;
   if (phone !== undefined) updates.phone = phone;
 
-  const [updated] = await db(TABLE)
-    .where({ id: userId })
-    .whereNull('deleted_at')
-    .update(updates)
-    .returning(PUBLIC_COLUMNS);
-
-  if (!updated) {
-    throw createError('User not found.', 404);
+  if (Object.keys(updates).length === 0) {
+    return getUserById(userId);
   }
 
-  return updated;
-}
+  updates.updated_at = db.fn.now();
+
+  await db('users').where({ id: userId, deleted_at: null }).update(updates);
+
+  return getUserById(userId);
+};
 
 /**
- * Change the password of the currently authenticated user.
- * Verifies the current password before applying the new hash.
- * @param {string} userId
- * @param {object} payload
- * @param {string} payload.currentPassword
- * @param {string} payload.newPassword
+ * Change the authenticated user's password after verifying the current one.
  */
-async function changePassword(userId, { currentPassword, newPassword }) {
-  const user = await db(TABLE)
-    .where({ id: userId })
-    .whereNull('deleted_at')
+const changePassword = async (userId, currentPassword, newPassword) => {
+  const row = await db('users')
     .select('id', 'password_hash')
+    .where({ id: userId, deleted_at: null })
     .first();
 
-  if (!user) {
-    throw createError('User not found.', 404);
+  if (!row) {
+    throw new AppError('User not found.', HTTP_STATUS.NOT_FOUND);
   }
 
-  const isMatch = await bcrypt.compare(currentPassword, user.password_hash);
+  const isMatch = await bcrypt.compare(currentPassword, row.password_hash);
   if (!isMatch) {
-    throw createError('Current password is incorrect.', 400);
+    throw new AppError('Current password is incorrect.', HTTP_STATUS.UNPROCESSABLE_ENTITY);
   }
 
   const passwordHash = await bcrypt.hash(newPassword, SALT_ROUNDS);
 
-  await db(TABLE)
+  await db('users')
     .where({ id: userId })
     .update({ password_hash: passwordHash, updated_at: db.fn.now() });
-}
+};
 
 /**
- * Admin: update any mutable field (including email and role) of a user.
- * @param {string} userId
- * @param {object} payload
- * @returns {Promise<object>}
+ * Return a paginated list of users (admin only).
  */
-async function updateUser(userId, payload) {
-  const { firstName, lastName, phone, email, role } = payload;
+const listUsers = async ({ page, limit, search, role, isActive }) => {
+  const offset = (page - 1) * limit;
 
-  const updates = { updated_at: db.fn.now() };
+  const query = db('users')
+    .select(PUBLIC_COLUMNS)
+    .whereNull('deleted_at')
+    .orderBy('created_at', 'desc')
+    .limit(limit)
+    .offset(offset);
+
+  const countQuery = db('users').whereNull('deleted_at').count('id as total');
+
+  if (search) {
+    const term = `%${search}%`;
+    query.where((qb) =>
+      qb
+        .whereILike('email', term)
+        .orWhereILike('first_name', term)
+        .orWhereILike('last_name', term)
+    );
+    countQuery.where((qb) =>
+      qb
+        .whereILike('email', term)
+        .orWhereILike('first_name', term)
+        .orWhereILike('last_name', term)
+    );
+  }
+
+  if (role !== undefined) {
+    query.where({ role });
+    countQuery.where({ role });
+  }
+
+  if (isActive !== undefined) {
+    query.where({ is_active: isActive });
+    countQuery.where({ is_active: isActive });
+  }
+
+  const [users, [{ total }]] = await Promise.all([query, countQuery]);
+
+  return {
+    data: users,
+    meta: {
+      page,
+      limit,
+      total: Number(total),
+      totalPages: Math.ceil(Number(total) / limit),
+    },
+  };
+};
+
+/**
+ * Admin: update any field including role and isActive.
+ */
+const adminUpdateUser = async (userId, payload) => {
+  const { firstName, lastName, phone, role, isActive } = payload;
+
+  const updates = {};
   if (firstName !== undefined) updates.first_name = firstName;
   if (lastName !== undefined) updates.last_name = lastName;
   if (phone !== undefined) updates.phone = phone;
-  if (email !== undefined) updates.email = email;
   if (role !== undefined) updates.role = role;
+  if (isActive !== undefined) updates.is_active = isActive;
 
-  if (email) {
-    const existing = await db(TABLE)
-      .where({ email })
-      .whereNot({ id: userId })
-      .whereNull('deleted_at')
-      .first();
-
-    if (existing) {
-      throw createError('Email address is already in use.', 409);
-    }
+  if (Object.keys(updates).length === 0) {
+    return getUserById(userId);
   }
 
-  const [updated] = await db(TABLE)
-    .where({ id: userId })
-    .whereNull('deleted_at')
-    .update(updates)
-    .returning(PUBLIC_COLUMNS);
+  updates.updated_at = db.fn.now();
 
-  if (!updated) {
-    throw createError('User not found.', 404);
+  const count = await db('users')
+    .where({ id: userId, deleted_at: null })
+    .update(updates);
+
+  if (count === 0) {
+    throw new AppError('User not found.', HTTP_STATUS.NOT_FOUND);
   }
 
-  return updated;
-}
+  return getUserById(userId);
+};
 
 /**
- * Admin: soft-delete a user by setting deleted_at.
- * @param {string} userId
+ * Soft-delete a user account.
  */
-async function deleteUser(userId) {
-  const [deleted] = await db(TABLE)
-    .where({ id: userId })
-    .whereNull('deleted_at')
-    .update({ deleted_at: db.fn.now() })
-    .returning('id');
+const deleteUser = async (userId) => {
+  const count = await db('users')
+    .where({ id: userId, deleted_at: null })
+    .update({ deleted_at: db.fn.now(), updated_at: db.fn.now() });
 
-  if (!deleted) {
-    throw createError('User not found.', 404);
+  if (count === 0) {
+    throw new AppError('User not found.', HTTP_STATUS.NOT_FOUND);
   }
-}
+};
 
 module.exports = {
   getUserById,
-  listUsers,
   updateProfile,
   changePassword,
-  updateUser,
+  listUsers,
+  adminUpdateUser,
   deleteUser,
 };
