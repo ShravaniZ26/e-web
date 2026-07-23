@@ -8,12 +8,9 @@ const authService = require('./auth.service');
 async function register(req, res, next) {
   try {
     const result = await authService.register(req.body);
-    return res.status(201).json({
-      success: true,
-      data: result,
-    });
+    return res.status(201).json({ success: true, data: result });
   } catch (err) {
-    next(err);
+    return next(err);
   }
 }
 
@@ -23,32 +20,22 @@ async function register(req, res, next) {
 async function login(req, res, next) {
   try {
     const result = await authService.login(req.body);
-    return res.status(200).json({
-      success: true,
-      data: result,
-    });
+    return res.status(200).json({ success: true, data: result });
   } catch (err) {
-    next(err);
+    return next(err);
   }
 }
 
 /**
  * POST /auth/logout
+ * Expects the client to send a valid Bearer token (authentication enforced at route level if needed).
  */
 async function logout(req, res, next) {
   try {
-    const authHeader = req.headers.authorization;
-    const token =
-      authHeader && authHeader.startsWith('Bearer ')
-        ? authHeader.slice(7)
-        : null;
-    await authService.logout(token);
-    return res.status(200).json({
-      success: true,
-      message: 'Logged out successfully.',
-    });
+    const result = await authService.logout();
+    return res.status(200).json({ success: true, data: result });
   } catch (err) {
-    next(err);
+    return next(err);
   }
 }
 
@@ -57,13 +44,11 @@ async function logout(req, res, next) {
  */
 async function forgotPassword(req, res, next) {
   try {
-    const result = await authService.forgotPassword(req.body);
-    return res.status(200).json({
-      success: true,
-      data: result,
-    });
+    const { email } = req.body;
+    const result = await authService.forgotPassword(email);
+    return res.status(200).json({ success: true, data: result });
   } catch (err) {
-    next(err);
+    return next(err);
   }
 }
 
@@ -72,13 +57,11 @@ async function forgotPassword(req, res, next) {
  */
 async function resetPassword(req, res, next) {
   try {
-    const result = await authService.resetPassword(req.body);
-    return res.status(200).json({
-      success: true,
-      data: result,
-    });
+    const { token, password } = req.body;
+    const result = await authService.resetPassword(token, password);
+    return res.status(200).json({ success: true, data: result });
   } catch (err) {
-    next(err);
+    return next(err);
   }
 }
 
@@ -88,12 +71,9 @@ async function resetPassword(req, res, next) {
 async function guestRegister(req, res, next) {
   try {
     const result = await authService.guestRegister(req.body);
-    return res.status(201).json({
-      success: true,
-      data: result,
-    });
+    return res.status(201).json({ success: true, data: result });
   } catch (err) {
-    next(err);
+    return next(err);
   }
 }
 

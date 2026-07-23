@@ -2,118 +2,65 @@
 
 const Joi = require('joi');
 
-// ---------------------------------------------------------------------------
-// Schemas
-// ---------------------------------------------------------------------------
+const registerSchema = Joi.object({
+  name: Joi.string().min(2).max(100).trim().required(),
+  email: Joi.string().email({ tlds: { allow: false } }).lowercase().trim().required(),
+  password: Joi.string().min(8).max(128).required(),
+});
 
-const schemas = {
-  register: Joi.object({
-    firstName: Joi.string().trim().min(1).max(100).required().messages({
-      'string.empty': 'First name is required.',
-      'any.required': 'First name is required.',
-      'string.max': 'First name must not exceed 100 characters.',
-    }),
-    lastName: Joi.string().trim().min(1).max(100).required().messages({
-      'string.empty': 'Last name is required.',
-      'any.required': 'Last name is required.',
-      'string.max': 'Last name must not exceed 100 characters.',
-    }),
-    email: Joi.string().email().lowercase().required().messages({
-      'string.email': 'A valid email address is required.',
-      'string.empty': 'Email is required.',
-      'any.required': 'Email is required.',
-    }),
-    password: Joi.string().min(8).max(128).required().messages({
-      'string.min': 'Password must be at least 8 characters long.',
-      'string.max': 'Password must not exceed 128 characters.',
-      'string.empty': 'Password is required.',
-      'any.required': 'Password is required.',
-    }),
-  }),
+const loginSchema = Joi.object({
+  email: Joi.string().email({ tlds: { allow: false } }).lowercase().trim().required(),
+  password: Joi.string().required(),
+});
 
-  login: Joi.object({
-    email: Joi.string().email().lowercase().required().messages({
-      'string.email': 'A valid email address is required.',
-      'string.empty': 'Email is required.',
-      'any.required': 'Email is required.',
-    }),
-    password: Joi.string().required().messages({
-      'string.empty': 'Password is required.',
-      'any.required': 'Password is required.',
-    }),
-  }),
+const forgotPasswordSchema = Joi.object({
+  email: Joi.string().email({ tlds: { allow: false } }).lowercase().trim().required(),
+});
 
-  forgotPassword: Joi.object({
-    email: Joi.string().email().lowercase().required().messages({
-      'string.email': 'A valid email address is required.',
-      'string.empty': 'Email is required.',
-      'any.required': 'Email is required.',
-    }),
-  }),
+const resetPasswordSchema = Joi.object({
+  token: Joi.string().required(),
+  password: Joi.string().min(8).max(128).required(),
+});
 
-  resetPassword: Joi.object({
-    token: Joi.string().required().messages({
-      'string.empty': 'Reset token is required.',
-      'any.required': 'Reset token is required.',
-    }),
-    password: Joi.string().min(8).max(128).required().messages({
-      'string.min': 'Password must be at least 8 characters long.',
-      'string.max': 'Password must not exceed 128 characters.',
-      'string.empty': 'Password is required.',
-      'any.required': 'Password is required.',
-    }),
-  }),
-
-  guestRegister: Joi.object({
-    firstName: Joi.string().trim().min(1).max(100).optional().messages({
-      'string.max': 'First name must not exceed 100 characters.',
-    }),
-    lastName: Joi.string().trim().min(1).max(100).optional().messages({
-      'string.max': 'Last name must not exceed 100 characters.',
-    }),
-    email: Joi.string().email().lowercase().optional().messages({
-      'string.email': 'A valid email address is required.',
-    }),
-  }),
-};
-
-// ---------------------------------------------------------------------------
-// Middleware factory
-// ---------------------------------------------------------------------------
+const guestRegisterSchema = Joi.object({
+  name: Joi.string().min(2).max(100).trim().optional(),
+});
 
 /**
- * Returns an Express middleware that validates req.body against the named schema.
- * On failure it responds immediately with HTTP 400 and a list of error messages.
- * On success req.body is replaced with the coerced, stripped value.
+ * Returns an Express middleware that validates req.body against the given Joi schema.
+ * On failure responds 422 with a structured errors array.
+ * On success, replaces req.body with the sanitised value and calls next().
  *
- * @param {'register'|'login'|'forgotPassword'|'resetPassword'|'guestRegister'} schemaName
+ * @param {Joi.ObjectSchema} schema
  * @returns {import('express').RequestHandler}
  */
-function validate(schemaName) {
-  const schema = schemas[schemaName];
-
-  if (!schema) {
-    throw new Error(`Unknown validation schema: "${schemaName}"`);
-  }
-
-  return function validationMiddleware(req, res, next) {
+function validate(schema) {
+  return (req, res, next) => {
     const { error, value } = schema.validate(req.body, {
       abortEarly: false,
       stripUnknown: true,
-      convert: true,
     });
 
     if (error) {
-      return res.status(400).json({
+      return res.status(422).json({
         success: false,
-        message: 'Validation failed.',
-        errors: error.details.map((detail) => detail.message),
+        errors: error.details.map((d) => ({
+          field: d.context && d.context.key ? d.context.key : null,
+          message: d.message,
+        })),
       });
     }
 
     req.body = value;
-    next();
+    return next();
   };
 }
 
-module.exports = { schemas, validate };
+module.exports = {
+  validate,
+  registerSchema,
+  loginSchema,
+  forgotPasswordSchema,
+  resetPasswordSchema,
+  guestRegisterSchema,
+};

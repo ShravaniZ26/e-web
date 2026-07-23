@@ -4,281 +4,175 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 
-// Database connection is expected at src/db (exports a pg-compatible query method).
-const db = require('../../db');
+// UserModel must expose: findByEmail(email), create(data), updateById(id, data)
+const UserModel = require('../../models/user.model');
 
-const SALT_ROUNDS = 12;
-const JWT_SECRET = process.env.JWT_SECRET || 'changeme_in_production';
+const SALT_ROUNDS = parseInt(process.env.BCRYPT_SALT_ROUNDS, 10) || 12;
+const JWT_SECRET = process.env.JWT_SECRET || 'changeme';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h';
-const RESET_TOKEN_EXPIRES_MS = 60 * 60 * 1000; // 1 hour
+const RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 /**
- * In-memory token blacklist for logout invalidation.
- * Replace with a Redis SET in production environments.
+ * In-memory store for password-reset tokens.
+ * Replace with a dedicated DB table (e.g. password_reset_tokens) for multi-process deployments.
+ *
+ * Structure: Map<token, { userId: string, expiresAt: number }>
  */
-const tokenBlacklist = new Set();
+const resetTokenStore = new Map();
 
-// ---------------------------------------------------------------------------
-// Register
-// ---------------------------------------------------------------------------
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/**
- * Creates a new standard user account.
- * @param {{ firstName: string, lastName: string, email: string, password: string }} data
- * @returns {{ token: string, user: object }}
- */
-async function register({ firstName, lastName, email, password }) {
-  const existing = await db.query('SELECT id FROM users WHERE email = $1', [
-    email,
-  ]);
-  if (existing.rows.length > 0) {
-    const err = new Error('An account with this email already exists.');
-    err.statusCode = 409;
-    throw err;
-  }
-
-  const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
-
-  const result = await db.query(
-    `INSERT INTO users
-       (first_name, last_name, email, password_hash, role, is_guest, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, 'user', false, NOW(), NOW())
-     RETURNING id, first_name, last_name, email, role`,
-    [firstName, lastName, email, passwordHash],
-  );
-
-  const user = result.rows[0];
-  const token = issueToken(user);
-
-  return { token, user: sanitizeUser(user) };
-}
-
-// ---------------------------------------------------------------------------
-// Login
-// ---------------------------------------------------------------------------
-
-/**
- * Authenticates a user with email and password.
- * @param {{ email: string, password: string }} credentials
- * @returns {{ token: string, user: object }}
- */
-async function login({ email, password }) {
-  const result = await db.query(
-    `SELECT id, first_name, last_name, email, password_hash, role
-     FROM users
-     WHERE email = $1 AND is_guest = false`,
-    [email],
-  );
-
-  if (result.rows.length === 0) {
-    const err = new Error('Invalid email or password.');
-    err.statusCode = 401;
-    throw err;
-  }
-
-  const user = result.rows[0];
-  const passwordMatch = await bcrypt.compare(password, user.password_hash);
-
-  if (!passwordMatch) {
-    const err = new Error('Invalid email or password.');
-    err.statusCode = 401;
-    throw err;
-  }
-
-  const token = issueToken(user);
-
-  return { token, user: sanitizeUser(user) };
-}
-
-// ---------------------------------------------------------------------------
-// Logout
-// ---------------------------------------------------------------------------
-
-/**
- * Blacklists the provided JWT so it cannot be reused.
- * @param {string|null} token
- */
-async function logout(token) {
-  if (token && typeof token === 'string') {
-    tokenBlacklist.add(token);
-  }
-}
-
-/**
- * Returns true if the given JWT has been invalidated via logout.
- * @param {string} token
- * @returns {boolean}
- */
-function isTokenBlacklisted(token) {
-  return tokenBlacklist.has(token);
-}
-
-// ---------------------------------------------------------------------------
-// Forgot password
-// ---------------------------------------------------------------------------
-
-/**
- * Generates a password-reset token and persists its hash against the user.
- * The raw token must be delivered to the user out-of-band (email).
- * The response message is deliberately ambiguous to prevent email enumeration.
- * @param {{ email: string }} data
- * @returns {{ message: string }}
- */
-async function forgotPassword({ email }) {
-  const AMBIGUOUS_RESPONSE = {
-    message:
-      'If that email address is associated with an account you will receive a password reset link shortly.',
-  };
-
-  const result = await db.query(
-    'SELECT id, email FROM users WHERE email = $1 AND is_guest = false',
-    [email],
-  );
-
-  if (result.rows.length === 0) {
-    // Return the same response regardless to prevent enumeration.
-    return AMBIGUOUS_RESPONSE;
-  }
-
-  const user = result.rows[0];
-
-  // Generate a cryptographically secure random token.
-  const rawToken = crypto.randomBytes(32).toString('hex');
-  const tokenHash = crypto
-    .createHash('sha256')
-    .update(rawToken)
-    .digest('hex');
-  const expiresAt = new Date(Date.now() + RESET_TOKEN_EXPIRES_MS);
-
-  await db.query(
-    `UPDATE users
-     SET reset_token = $1, reset_token_expires = $2, updated_at = NOW()
-     WHERE id = $3`,
-    [tokenHash, expiresAt, user.id],
-  );
-
-  // TODO: Integrate with email service to deliver rawToken as a reset link.
-  // e.g. emailService.sendPasswordReset(user.email, rawToken);
-
-  return AMBIGUOUS_RESPONSE;
-}
-
-// ---------------------------------------------------------------------------
-// Reset password
-// ---------------------------------------------------------------------------
-
-/**
- * Validates a reset token and updates the user's password.
- * @param {{ token: string, password: string }} data
- * @returns {{ message: string }}
- */
-async function resetPassword({ token, password }) {
-  const tokenHash = crypto
-    .createHash('sha256')
-    .update(token)
-    .digest('hex');
-
-  const result = await db.query(
-    `SELECT id FROM users
-     WHERE reset_token = $1
-       AND reset_token_expires > NOW()
-       AND is_guest = false`,
-    [tokenHash],
-  );
-
-  if (result.rows.length === 0) {
-    const err = new Error('Password reset token is invalid or has expired.');
-    err.statusCode = 400;
-    throw err;
-  }
-
-  const user = result.rows[0];
-  const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
-
-  await db.query(
-    `UPDATE users
-     SET password_hash = $1,
-         reset_token = NULL,
-         reset_token_expires = NULL,
-         updated_at = NOW()
-     WHERE id = $2`,
-    [passwordHash, user.id],
-  );
-
-  return { message: 'Your password has been reset successfully.' };
-}
-
-// ---------------------------------------------------------------------------
-// Guest register
-// ---------------------------------------------------------------------------
-
-/**
- * Creates an anonymous guest user session.
- * @param {{ firstName?: string, lastName?: string, email?: string }} data
- * @returns {{ token: string, user: object }}
- */
-async function guestRegister({ firstName, lastName, email } = {}) {
-  const guestEmail =
-    email ||
-    `guest_${crypto.randomBytes(8).toString('hex')}@guest.local`;
-
-  // Use a random placeholder hash — guest accounts cannot log in with a password.
-  const placeholderHash = await bcrypt.hash(
-    crypto.randomBytes(16).toString('hex'),
-    SALT_ROUNDS,
-  );
-
-  const result = await db.query(
-    `INSERT INTO users
-       (first_name, last_name, email, password_hash, role, is_guest, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, 'guest', true, NOW(), NOW())
-     RETURNING id, first_name, last_name, email, role`,
-    [firstName || 'Guest', lastName || 'User', guestEmail, placeholderHash],
-  );
-
-  const user = result.rows[0];
-  const token = issueToken(user);
-
-  return { token, user: sanitizeUser(user) };
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Signs and returns a JWT for the given user record.
- * @param {{ id: number|string, email: string, role: string }} user
- * @returns {string}
- */
-function issueToken(user) {
+function issueJwt(user) {
   return jwt.sign(
     { sub: user.id, email: user.email, role: user.role },
     JWT_SECRET,
-    { expiresIn: JWT_EXPIRES_IN },
+    { expiresIn: JWT_EXPIRES_IN }
   );
 }
 
-/**
- * Strips sensitive fields before exposing a user object to clients.
- * @param {object} user
- * @returns {object}
- */
 function sanitizeUser(user) {
-  return {
-    id: user.id,
-    firstName: user.first_name,
-    lastName: user.last_name,
-    email: user.email,
-    role: user.role,
+  // Remove sensitive fields before returning to caller.
+  // Works with plain objects; if user is an ORM instance call .toObject() / .get({ plain: true }) first.
+  const { passwordHash, password, ...safe } = user;
+  return safe;
+}
+
+function createHttpError(message, statusCode) {
+  const err = new Error(message);
+  err.statusCode = statusCode;
+  return err;
+}
+
+// ─── Service methods ──────────────────────────────────────────────────────────
+
+/**
+ * Register a new standard user account.
+ *
+ * @param {{ name: string, email: string, password: string }} data
+ * @returns {Promise<{ token: string, user: object }>}
+ */
+async function register({ name, email, password }) {
+  const existing = await UserModel.findByEmail(email);
+  if (existing) {
+    throw createHttpError('Email already in use', 409);
+  }
+
+  const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
+  const user = await UserModel.create({ name, email, passwordHash, role: 'user' });
+
+  const token = issueJwt(user);
+  return { token, user: sanitizeUser(user) };
+}
+
+/**
+ * Authenticate a user and return a JWT.
+ *
+ * @param {{ email: string, password: string }} data
+ * @returns {Promise<{ token: string, user: object }>}
+ */
+async function login({ email, password }) {
+  const user = await UserModel.findByEmail(email);
+  if (!user) {
+    throw createHttpError('Invalid credentials', 401);
+  }
+
+  const passwordField = user.passwordHash || user.password;
+  const valid = await bcrypt.compare(password, passwordField);
+  if (!valid) {
+    throw createHttpError('Invalid credentials', 401);
+  }
+
+  const token = issueJwt(user);
+  return { token, user: sanitizeUser(user) };
+}
+
+/**
+ * Logout the current user.
+ * JWT is stateless; the client is responsible for discarding the token.
+ * For hard revocation, add the token JTI to a blocklist here.
+ *
+ * @returns {Promise<{ message: string }>}
+ */
+async function logout() {
+  return { message: 'Logged out successfully' };
+}
+
+/**
+ * Initiate the forgot-password flow.
+ * Always returns the same message to prevent user enumeration.
+ *
+ * @param {string} email
+ * @returns {Promise<{ message: string }>}
+ */
+async function forgotPassword(email) {
+  const SAFE_RESPONSE = {
+    message: 'If an account with that email exists, a reset link has been sent.',
   };
+
+  const user = await UserModel.findByEmail(email);
+  if (!user) {
+    return SAFE_RESPONSE;
+  }
+
+  const token = crypto.randomBytes(32).toString('hex');
+  const expiresAt = Date.now() + RESET_TOKEN_TTL_MS;
+  resetTokenStore.set(token, { userId: user.id, expiresAt });
+
+  // TODO: dispatch email containing reset link with token
+  // await emailService.sendPasswordResetEmail(user.email, token);
+
+  return SAFE_RESPONSE;
+}
+
+/**
+ * Complete the password-reset flow.
+ *
+ * @param {string} token  - The opaque reset token issued by forgotPassword
+ * @param {string} newPassword - The new plain-text password
+ * @returns {Promise<{ message: string }>}
+ */
+async function resetPassword(token, newPassword) {
+  const entry = resetTokenStore.get(token);
+  if (!entry || Date.now() > entry.expiresAt) {
+    throw createHttpError('Invalid or expired password reset token', 400);
+  }
+
+  const passwordHash = await bcrypt.hash(newPassword, SALT_ROUNDS);
+  await UserModel.updateById(entry.userId, { passwordHash });
+  resetTokenStore.delete(token);
+
+  return { message: 'Password reset successfully' };
+}
+
+/**
+ * Register an ephemeral guest user and return a JWT.
+ *
+ * @param {{ name?: string }} data
+ * @returns {Promise<{ token: string, user: object }>}
+ */
+async function guestRegister({ name } = {}) {
+  const guestSuffix = crypto.randomBytes(8).toString('hex');
+  const guestEmail = `guest_${guestSuffix}@guest.local`;
+  const guestName = name || `Guest_${guestSuffix.slice(0, 6)}`;
+
+  // Assign a random non-guessable password so the account is not accessible via login
+  const passwordHash = await bcrypt.hash(crypto.randomBytes(16).toString('hex'), SALT_ROUNDS);
+
+  const user = await UserModel.create({
+    name: guestName,
+    email: guestEmail,
+    passwordHash,
+    role: 'guest',
+  });
+
+  const token = issueJwt(user);
+  return { token, user: sanitizeUser(user) };
 }
 
 module.exports = {
   register,
   login,
   logout,
-  isTokenBlacklisted,
   forgotPassword,
   resetPassword,
   guestRegister,
