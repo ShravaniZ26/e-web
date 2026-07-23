@@ -1,77 +1,54 @@
-const addressService = require('./addresses.service');
+'use strict';
 
-const getAddresses = async (req, res, next) => {
+const addressesService = require('./addresses.service');
+
+async function getAddresses(req, res, next) {
   try {
-    const userId = req.user.id;
-    const addresses = await addressService.getAddressesByUserId(userId);
-    return res.status(200).json({
-      success: true,
-      data: addresses,
-    });
+    const addresses = await addressesService.getAddresses(req.user.id);
+    return res.status(200).json({ success: true, data: addresses });
   } catch (err) {
     next(err);
   }
-};
+}
 
-const getAddress = async (req, res, next) => {
+async function getAddress(req, res, next) {
   try {
-    const userId = req.user.id;
-    const { addressId } = req.params;
-    const address = await addressService.getAddressById(addressId, userId);
-    return res.status(200).json({
-      success: true,
-      data: address,
-    });
+    const address = await addressesService.getAddressById(req.user.id, req.params.addressId);
+    return res.status(200).json({ success: true, data: address });
   } catch (err) {
     next(err);
   }
-};
+}
 
-const createAddress = async (req, res, next) => {
+async function createAddress(req, res, next) {
   try {
-    const userId = req.user.id;
-    const address = await addressService.createAddress(userId, req.body);
-    return res.status(201).json({
-      success: true,
-      data: address,
-    });
+    const address = await addressesService.createAddress(req.user.id, req.body);
+    return res.status(201).json({ success: true, data: address });
   } catch (err) {
     next(err);
   }
-};
+}
 
-const updateAddress = async (req, res, next) => {
+async function updateAddress(req, res, next) {
   try {
-    const userId = req.user.id;
-    const { addressId } = req.params;
-    const address = await addressService.updateAddress(addressId, userId, req.body);
-    return res.status(200).json({
-      success: true,
-      data: address,
-    });
+    const address = await addressesService.updateAddress(
+      req.user.id,
+      req.params.addressId,
+      req.body,
+    );
+    return res.status(200).json({ success: true, data: address });
   } catch (err) {
     next(err);
   }
-};
+}
 
-const deleteAddress = async (req, res, next) => {
+async function deleteAddress(req, res, next) {
   try {
-    const userId = req.user.id;
-    const { addressId } = req.params;
-    await addressService.deleteAddress(addressId, userId);
-    return res.status(200).json({
-      success: true,
-      message: 'Address deleted successfully.',
-    });
+    await addressesService.deleteAddress(req.user.id, req.params.addressId);
+    return res.status(200).json({ success: true, message: 'Address deleted successfully.' });
   } catch (err) {
     next(err);
   }
-};
+}
 
-module.exports = {
-  getAddresses,
-  getAddress,
-  createAddress,
-  updateAddress,
-  deleteAddress,
-};
+module.exports = { getAddresses, getAddress, createAddress, updateAddress, deleteAddress };

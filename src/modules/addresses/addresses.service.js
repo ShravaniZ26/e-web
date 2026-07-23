@@ -1,161 +1,151 @@
-const db = require('../../db');
+'use strict';
 
-/**
- * Fetch all addresses belonging to a user.
- * Default address is returned first.
- */
-const getAddressesByUserId = async (userId) => {
+const db = require('../../config/db');
+
+class NotFoundError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'NotFoundError';
+    this.statusCode = 404;
+  }
+}
+
+class BadRequestError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'BadRequestError';
+    this.statusCode = 400;
+  }
+}
+
+async function isPinCodeServiceable(pinCode) {
+  const record = await db('serviceable_pin_codes').where({ pin_code: pinCode }).first();
+  return !!record;
+}
+
+async function getAddresses(userId) {
   return db('addresses')
     .where({ user_id: userId })
-    .orderBy('is_default', 'desc')
-    .orderBy('created_at', 'desc');
-};
+    .orderBy([
+      { column: 'is_default', order: 'desc' },
+      { column: 'created_at', order: 'desc' },
+    ]);
+}
 
-/**
- * Fetch a single address by id, scoped to the authenticated user.
- * Throws 404 if not found.
- */
-const getAddressById = async (addressId, userId) => {
-  const address = await db('addresses')
-    .where({ id: addressId, user_id: userId })
-    .first();
-
+async function getAddressById(userId, addressId) {
+  const address = await db('addresses').where({ id: addressId, user_id: userId }).first();
   if (!address) {
-    const err = new Error('Address not found.');
-    err.statusCode = 404;
-    throw err;
+    throw new NotFoundError('Address not found.');
   }
-
   return address;
-};
+}
 
-/**
- * Create a new address for the user.
- * - Validates pin code serviceability.
- * - Automatically marks the new address as default if it is the first one
- *   or if is_default is explicitly requested.
- * - Unsets the previous default when a new default is set.
- */
-const createAddress = async (userId, data) => {
-  const { is_default: requestedDefault = false, ...rest } = data;
-
-  await assertPinCodeServiceable(rest.pin_code);
-
-  return db.transaction(async (trx) => {
-    const [{ count }] = await trx('addresses')
-      .where({ user_id: userId })
-      .count('id as count');
-
-    const isFirstAddress = parseInt(count, 10) === 0;
-    const shouldBeDefault = isFirstAddress || requestedDefault;
-
-    if (shouldBeDefault && !isFirstAddress) {
-      await trx('addresses')
-        .where({ user_id: userId })
-        .update({ is_default: false, updated_at: db.fn.now() });
-    }
-
-    const [address] = await trx('addresses')
-      .insert({
-        user_id: userId,
-        ...rest,
-        is_default: shouldBeDefault,
-        created_at: db.fn.now(),
-        updated_at: db.fn.now(),
-      })
-      .returning('*');
-
-    return address;
-  });
-};
-
-/**
- * Update an existing address.
- * - Validates pin code serviceability when pin_code is changed.
- * - Handles default address promotion logic.
- */
-const updateAddress = async (addressId, userId, data) => {
-  await getAddressById(addressId, userId);
-
-  const { is_default: requestedDefault, ...rest } = data;
-
-  if (rest.pin_code !== undefined) {
-    await assertPinCodeServiceable(rest.pin_code);
+async function createAddress(userId, data) {
+  const isServiceable = await isPinCodeServiceable(data.pin_code);
+  if (!isServiceable) {
+    throw new BadRequestError('Delivery is not available for this PIN code.');
   }
 
   return db.transaction(async (trx) => {
-    if (requestedDefault) {
+    const existingCount = await trx('addresses')
+      .where({ user_id: userId })
+      .count('id as count')
+      .first();
+    const hasNoAddresses = parseInt(existingCount.count, 10) === 0;
+
+    const makeDefault = hasNoAddresses || data.is_default === true;
+
+    if (makeDefault) {
+      await trx('addresses').where({ user_id: userId }).update({ is_default: false });
+    }
+
+    const [insertedId] = await trx('addresses').insert({
+      user_id: userId,
+      full_name: data.full_name,
+      phone_number: data.phone_number,
+      address_line1: data.address_line1,
+      address_line2: data.address_line2 || null,
+      city: data.city,
+      state: data.state,
+      pin_code: data.pin_code,
+      country: data.country,
+      address_type: data.address_type,
+      is_default: makeDefault,
+    });
+
+    return trx('addresses').where({ id: insertedId }).first();
+  });
+}
+
+async function updateAddress(userId, addressId, data) {
+  const existing = await getAddressById(userId, addressId);
+
+  const incomingPinCode = data.pin_code;
+  if (incomingPinCode && incomingPinCode !== existing.pin_code) {
+    const isServiceable = await isPinCodeServiceable(incomingPinCode);
+    if (!isServiceable) {
+      throw new BadRequestError('Delivery is not available for this PIN code.');
+    }
+  }
+
+  return db.transaction(async (trx) => {
+    if (data.is_default === true) {
       await trx('addresses')
         .where({ user_id: userId })
-        .update({ is_default: false, updated_at: db.fn.now() });
+        .whereNot({ id: addressId })
+        .update({ is_default: false });
     }
 
-    const updatePayload = {
-      ...rest,
-      updated_at: db.fn.now(),
-    };
-
-    if (requestedDefault !== undefined) {
-      updatePayload.is_default = requestedDefault;
+    const updatePayload = {};
+    const allowedFields = [
+      'full_name',
+      'phone_number',
+      'address_line1',
+      'address_line2',
+      'city',
+      'state',
+      'pin_code',
+      'country',
+      'address_type',
+      'is_default',
+    ];
+    for (const field of allowedFields) {
+      if (Object.prototype.hasOwnProperty.call(data, field)) {
+        updatePayload[field] = data[field];
+      }
     }
 
-    const [updated] = await trx('addresses')
-      .where({ id: addressId, user_id: userId })
-      .update(updatePayload)
-      .returning('*');
+    await trx('addresses').where({ id: addressId, user_id: userId }).update(updatePayload);
 
-    return updated;
+    return trx('addresses').where({ id: addressId }).first();
   });
-};
+}
 
-/**
- * Delete an address.
- * - If the deleted address was the default, promote the most recently
- *   created remaining address to default.
- */
-const deleteAddress = async (addressId, userId) => {
-  const address = await getAddressById(addressId, userId);
+async function deleteAddress(userId, addressId) {
+  const address = await getAddressById(userId, addressId);
 
   await db.transaction(async (trx) => {
     await trx('addresses').where({ id: addressId, user_id: userId }).delete();
 
     if (address.is_default) {
-      const next = await trx('addresses')
+      const nextAddress = await trx('addresses')
         .where({ user_id: userId })
-        .orderBy('created_at', 'desc')
+        .orderBy('created_at', 'asc')
         .first();
-
-      if (next) {
-        await trx('addresses')
-          .where({ id: next.id })
-          .update({ is_default: true, updated_at: db.fn.now() });
+      if (nextAddress) {
+        await trx('addresses').where({ id: nextAddress.id }).update({ is_default: true });
       }
     }
   });
-};
-
-/**
- * Check whether a pin code exists in serviceable_pin_codes.
- * Throws 422 when not serviceable.
- */
-const assertPinCodeServiceable = async (pinCode) => {
-  const record = await db('serviceable_pin_codes')
-    .where({ pin_code: pinCode, is_active: true })
-    .first();
-
-  if (!record) {
-    const err = new Error('Delivery is not available for the provided pin code.');
-    err.statusCode = 422;
-    err.code = 'PIN_CODE_NOT_SERVICEABLE';
-    throw err;
-  }
-};
+}
 
 module.exports = {
-  getAddressesByUserId,
+  getAddresses,
   getAddressById,
   createAddress,
   updateAddress,
   deleteAddress,
-  assertPinCodeServiceable,
+  isPinCodeServiceable,
+  NotFoundError,
+  BadRequestError,
 };
